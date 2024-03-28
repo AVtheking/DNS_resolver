@@ -1,0 +1,21 @@
+{
+  "name": "dns_resolver",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node build/index.js",
+    "dev": "tsc-watch --onSuccess \"npm start\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "nodemon": "^3.1.0",
+    "ts-node": "^10.9.2",
+    "tsc-watch": "^6.1.0",
+    "tslib": "^2.6.2",
+    "typescript": "^5.4.3"
+  }
+}
