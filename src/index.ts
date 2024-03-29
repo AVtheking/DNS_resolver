@@ -2,19 +2,21 @@ import dgram from "node:dgram";
 import net from "node:net";
 import { interpretIp } from "./InterpretIp";
 import { createDNSQuery } from "./createDNSmessage";
+import { parseDomainName } from "./parseDomainName";
 
 const ROOT_DNS_SERVER = "198.41.0.4";
 const PORT = 53;
-const DOMAIN_TO_RESOLVE = "www.google.com";
+let DOMAIN_TO_RESOLVE = "devalan.tech";
 interface DNSRecord {
   domainName: string;
   newOffset: number;
   type: number;
   rdata: string;
 }
+
 function queryDNS(domain: string, server: string) {
   const ipVersion = net.isIP(server);
-
+  console.log(server);
   const socketType = ipVersion === 6 ? "udp6" : "udp4";
   const client = dgram.createSocket(socketType);
   const dnsQuery = createDNSQuery(domain);
@@ -50,34 +52,67 @@ function parseDNSResponse(buffer: Buffer) {
 
   //header is of 12 bytes
   let offset = 12;
-  // console.log(buffer);
-  const domain = parseDomainName(buffer, offset);
+
+  const question = parseQuestion(buffer, offset);
 
   //question is of 4 bytes -> 2 bytes for type and 2 bytes for class and 2 bytes for the domain name
-  offset = domain.newOffset + 4;
+  offset = question.newOffset + 4;
 
   const answerRecords = parseSections(buffer, answercount, offset);
-  console.log(`answer records: ${JSON.stringify(answerRecords)}`);
   offset = updateOffset(answerRecords, offset);
+
   const authorityRecords = parseSections(buffer, authoritycount, offset);
-  // console.log(`authority records: ${authorityRecords}`);
   offset = updateOffset(authorityRecords, offset);
 
   const additionalRecords = parseSections(buffer, additionalcount, offset);
-  // console.log(`additional records: ${additionalRecords}`);
   offset = updateOffset(additionalRecords, offset);
-  // console.log(`additional records: ${additionalRecords}`);
-  if (authorityRecords.length > 0) {
-    const nsRecord = authorityRecords[0];
+  // console.log(`Question: ${JSON.stringify(authorityRecords)}`);
+  //this means that the query is redirected to the name servers
+
+  if (authorityRecords.length > 0 && answerRecords.length === 0) {
+    //one name server is enough to find the Ip address
+    // const nsRecord = authorityRecords[1];
+    let nsRecord: DNSRecord | undefined;
+
+    //ip address is present in the additional records
+    for (let i = 0; i < additionalRecords.length; i++) {
+      const domain = additionalRecords[i].domainName;
+      nsRecord = authorityRecords.find((record) => record.rdata === domain);
+      if (nsRecord) {
+        break;
+      }
+    }
+    if (nsRecord === undefined) {
+      console.log("No name server found");
+      return;
+    }
+    console.log(`Name server found :${nsRecord?.rdata}`);
+
     const nsIp = additionalRecords.find(
-      (record) => record.domainName === nsRecord.rdata
+      (record) => record.domainName === nsRecord?.rdata
     )?.rdata;
     if (nsIp) {
       queryDNS(DOMAIN_TO_RESOLVE, nsIp);
     }
   } else {
-    const answerRecor = answerRecords[0];
-    console.log(`Ip address found :${answerRecor?.rdata}`);
+    //if the answer is a cname record
+    if (answerRecords[0]?.type === 5) {
+      const cnameRecord = answerRecords[0];
+      console.log(`Cname found :${cnameRecord?.rdata}`);
+
+      //remove the last dot from the domain name
+      //recursively query the name server with the new domain name
+      DOMAIN_TO_RESOLVE = cnameRecord.rdata.slice(
+        0,
+        cnameRecord.rdata.length - 1
+      );
+        
+      queryDNS(DOMAIN_TO_RESOLVE, ROOT_DNS_SERVER);
+    } else {
+      //for type A and AAAA records
+      const answerRecor = answerRecords[0];
+      console.log(`Ip address found :${answerRecor?.rdata}`);
+    }
   }
 }
 function isResponse(response: Buffer): boolean {
@@ -91,11 +126,10 @@ function parseSections(
 ): Array<DNSRecord> {
   let offset = startOffset;
   const records = [];
- 
 
   for (let i = 0; i < count; i++) {
     const record = parseRecords(buffer, offset);
-    
+
     records.push(record);
 
     offset = record.newOffset;
@@ -107,7 +141,7 @@ function parseSections(
 function parseRecords(buffer: Buffer, offset: number): DNSRecord {
   const domainNameData = parseDomainName(buffer, offset);
   offset = domainNameData.newOffset;
- 
+
   const type = buffer.readUInt16BE(offset);
 
   //  skipping the type bits
@@ -129,24 +163,31 @@ function parseRecords(buffer: Buffer, offset: number): DNSRecord {
   offset += 2;
   let rdata: string;
 
-  
   if (type === 2) {
-    //work in progress
-    //some understandings:
-    // if the type is 2 then it means it is a name server type which
-    // redirects the query to the authoritative name server
+    /*
+    type 2 indicates that the query is redirected to the name servers.
+    In this case we do not get the Ip address in the rdata
+    instead we get the refrence to the domain name to which the query is redirected
+    we need to use this domain name to query the name server
+    */
     const { domainName, newOffset } = parseDomainName(buffer, offset);
     offset = newOffset;
+    // console.log(domainName);
+    //because in ns record the rdata is a domain name
+    rdata = domainName;
+  } else if (type === 5) {
+    const { domainName, newOffset } = parseDomainName(buffer, offset);
+    offset = newOffset;
+
     //because in ns record the rdata is a domain name
     rdata = domainName;
   } else {
     const rdataBuffer = buffer.slice(offset, offset + dataLength);
+
     //increase the offset by the data length
     offset += dataLength;
     const ipAddress = interpretIp(rdataBuffer, type);
-    // console.log(`Ip address: ${ipAddress} type: ${type}`);
-    // const ipAddress = Array.from(rdataBuffer).join(".");
-    // console.log(Array.from(rdataBuffer));
+
     rdata = ipAddress;
   }
 
@@ -157,57 +198,11 @@ function parseRecords(buffer: Buffer, offset: number): DNSRecord {
     rdata,
   };
 }
-
-function parseDomainName(response: Buffer, offset: number) {
-  let name = "";
-  let hasEncounteredPointer = false;
-  let originalOffset = offset;
-
-  while (true) {
-    //calculate the length of the label
-    const lengthByte = response[offset];
-    //if the length is 0, we have reached the end of the domain name
-    if (lengthByte === 0) {
-      offset++;
-      break;
-    }
-    //checking for dns compression, if the first two bits are set, it is a pointer
-    if (isPointer(lengthByte)) {
-      if (!hasEncounteredPointer) {
-        originalOffset = offset + 2;
-        hasEncounteredPointer = true;
-      }
-      //calculate the offset to which the pointer is pointing
-      offset = calculateOffset(lengthByte, offset, response);
-      continue;
-    }
-
-    let newOffset = offset + lengthByte + 1;
-
-    const label = response.toString("ascii", offset + 1, newOffset);
-    offset = offset + lengthByte + 1;
-    name = name + label + ".";
-  }
-
-  return {
-    domainName: name,
-    newOffset: hasEncounteredPointer ? originalOffset : offset,
-  };
-}
-function isPointer(lengthbyte: number) {
-  return (lengthbyte & 0xc0) === 0xc0;
+function parseQuestion(buffer: Buffer, offset: number) {
+  const question = parseDomainName(buffer, offset);
+  return question;
 }
 
-function calculateOffset(lengthByte: number, offset: number, buffer: Buffer) {
-  /*
-  First we bit mask the first two bits by operating with 0x3f
-  Then we shift the result by 8 bits to the left so that we get 8 bits zero in the right
-  The first two set bit tell us that this is the pointer
-  A pointer is 16 bits long, so we add the second byte to the result
-
-*/
-  return ((lengthByte & 0x3f) << 8) | buffer[offset + 1];
-}
 function updateOffset(record: Array<any>, offset: number) {
   return record.length > 0 ? record[record.length - 1].newOffset : offset;
 }
