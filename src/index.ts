@@ -2,10 +2,15 @@ import dgram from "node:dgram";
 import net from "node:net";
 import { createDNSQuery } from "./createDNSmessage";
 
-const ROOT_DNS_SERVER = "198.41.0.4";
+const ROOT_DNS_SERVER = "8.8.8.8";
 const PORT = 53;
 const DOMAIN_TO_RESOLVE = "www.google.com";
-
+interface DNSRecord {
+  domainName: string;
+  newOffset: number;
+  type: number;
+  rdata: string;
+}
 function queryDNS(domain: string, server: string) {
   const ipVersion = net.isIP(server);
 
@@ -37,29 +42,34 @@ function parseDNSResponse(buffer: Buffer) {
   const header = buffer.slice(0, 12);
   const tranactionId = header.readUInt16BE(0);
   const questionCount = header.readUInt16BE(4);
-  const answerRR = header.readUInt16BE(6);
-  const authorityRR = header.readUInt16BE(8);
-  const additionalRR = header.readUInt16BE(10);
-  //   console.log(`Transaction ID: ${tranactionId}`);
-  //   console.log(`Flags: ${flags}`);
-  //   console.log(`Questions: ${questionCount}`);
-  console.log(`Answer RRs: ${answerRR}`);
-  console.log(`Authority RRs: ${authorityRR}`);
-  console.log(`Additional RRs: ${additionalRR}`);
+  const answercount = header.readUInt16BE(6);
+  const authoritycount = header.readUInt16BE(8);
+  const additionalcount = header.readUInt16BE(10);
+
   let offset = 12;
-  console.log(buffer);
+  // console.log(buffer);
   const domain = parseDomainName(buffer, offset);
-  console.log(domain);
-  console.log(buffer.readUInt16BE(domain.newOffset + 3));
+  // console.log(domain);
+  // console.log(buffer.readUInt16BE(domain.newOffset + 3));
   offset = domain.newOffset + 4;
 
-  const record = parseSections(buffer, authorityRR, offset);
+  const answerRecords = parseSections(buffer, answercount, offset);
+  offset = updateOffset(answerRecords, offset);
+  const authorityRecords = parseSections(buffer, authoritycount, offset);
+  offset = updateOffset(authorityRecords, offset);
+  const additionalRecords = parseSections(buffer, additionalcount, offset);
+  offset = updateOffset(additionalRecords, offset);
+  console.log(`Ip address found :${answerRecords[0].rdata}`);
 }
 function isResponse(response: Buffer): boolean {
   const flags = response.readUInt16BE(2);
   return (flags & 0x8000) !== 0;
 }
-function parseSections(buffer: Buffer, count: number, startOffset: number) {
+function parseSections(
+  buffer: Buffer,
+  count: number,
+  startOffset: number
+): Array<DNSRecord> {
   let offset = startOffset;
   const records = [];
 
@@ -72,28 +82,45 @@ function parseSections(buffer: Buffer, count: number, startOffset: number) {
   return records;
 }
 
-function parseRecords(buffer: Buffer, offset: number) {
+function parseRecords(buffer: Buffer, offset: number): DNSRecord {
   const domainNameData = parseDomainName(buffer, offset);
   offset = domainNameData.newOffset;
-
+  // console.log(`Offset: ${offset}`);
   const type = buffer.readUInt16BE(offset);
-  console.log(`Type: ${type}`);
+  // console.log(`Type: ${type}`);
+  //  skipping the type bits
   offset += 2;
   const classValue = buffer.readUInt16BE(offset);
-  console.log(`Class: ${classValue}`);
+  //  skipping the class bits
   offset += 2;
   const ttl = buffer.readUInt32BE(offset);
-  console.log(`TTL: ${ttl}`);
+  //skipping the ttl bits
   offset += 4;
   const dataLength = buffer.readUInt16BE(offset);
-  console.log(`Data length: ${dataLength}`);
+  //skipping the data length bits
   offset += 2;
+  let rdata: string;
+  // console.log(domainNameData);
+  if (type === 2) {
+    //work in progress
+    //some understandings:
+    // if the type is 2 then it means it is a name server type which
+    // redirects the query to the authoritative name server
+    const { domainName, newOffset } = parseDomainName(buffer, offset);
+    offset = newOffset;
+    rdata = domainName;
+  } else {
+    const rdataBuffer = buffer.slice(offset, offset + dataLength);
+    const ipAddress = Array.from(rdataBuffer).join(".");
+    // console.log(ipAddress);
+    rdata = ipAddress;
+  }
 
-  console.log(domainNameData);
-  // console.log(type)
   return {
     domainName: domainNameData.domainName,
     newOffset: offset,
+    type,
+    rdata,
   };
 }
 
@@ -101,17 +128,22 @@ function parseDomainName(response: Buffer, offset: number) {
   let name = "";
   let hasEncounteredPointer = false;
   let originalOffset = offset;
+
   while (true) {
+    //calculate the length of the label
     const lengthByte = response[offset];
+    //if the length is 0, we have reached the end of the domain name
     if (lengthByte === 0) {
       offset++;
       break;
     }
+    //checking for dns compression, if the first two bits are set, it is a pointer
     if (isPointer(lengthByte)) {
       if (!hasEncounteredPointer) {
         originalOffset = offset + 2;
         hasEncounteredPointer = true;
       }
+      //calculate the offset to which the pointer is pointing
       offset = calculateOffset(lengthByte, offset, response);
       continue;
     }
@@ -133,6 +165,13 @@ function isPointer(lengthbyte: number) {
 }
 
 function calculateOffset(lengthByte: number, offset: number, buffer: Buffer) {
+  /*
+  First we bit mask the first two bits by operating with 0x3f
+  Then we shift the result by 8 bits to the left so that we get 8 bits zero in the right
+  The first two set bit tell us that this is the pointer
+  A pointer is 16 bits long, so we add the second byte to the result
+
+*/
   return ((lengthByte & 0x3f) << 8) | buffer[offset + 1];
 }
 function updateOffset(record: Array<any>, offset: number) {
