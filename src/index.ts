@@ -1,8 +1,9 @@
 import dgram from "node:dgram";
 import net from "node:net";
+import { interpretIp } from "./InterpretIp";
 import { createDNSQuery } from "./createDNSmessage";
 
-const ROOT_DNS_SERVER = "8.8.8.8";
+const ROOT_DNS_SERVER = "198.41.0.4";
 const PORT = 53;
 const DOMAIN_TO_RESOLVE = "www.google.com";
 interface DNSRecord {
@@ -36,6 +37,7 @@ function parseDNSResponse(buffer: Buffer) {
   if (!isResponse(buffer)) {
     console.log("This is not a response");
   }
+
   // Parse the response
   // Extract the IP address from the response
   // Return the IP address
@@ -46,20 +48,37 @@ function parseDNSResponse(buffer: Buffer) {
   const authoritycount = header.readUInt16BE(8);
   const additionalcount = header.readUInt16BE(10);
 
+  //header is of 12 bytes
   let offset = 12;
   // console.log(buffer);
   const domain = parseDomainName(buffer, offset);
-  // console.log(domain);
-  // console.log(buffer.readUInt16BE(domain.newOffset + 3));
+
+  //question is of 4 bytes -> 2 bytes for type and 2 bytes for class and 2 bytes for the domain name
   offset = domain.newOffset + 4;
 
   const answerRecords = parseSections(buffer, answercount, offset);
+  console.log(`answer records: ${JSON.stringify(answerRecords)}`);
   offset = updateOffset(answerRecords, offset);
   const authorityRecords = parseSections(buffer, authoritycount, offset);
+  // console.log(`authority records: ${authorityRecords}`);
   offset = updateOffset(authorityRecords, offset);
+
   const additionalRecords = parseSections(buffer, additionalcount, offset);
+  // console.log(`additional records: ${additionalRecords}`);
   offset = updateOffset(additionalRecords, offset);
-  console.log(`Ip address found :${answerRecords[0].rdata}`);
+  // console.log(`additional records: ${additionalRecords}`);
+  if (authorityRecords.length > 0) {
+    const nsRecord = authorityRecords[0];
+    const nsIp = additionalRecords.find(
+      (record) => record.domainName === nsRecord.rdata
+    )?.rdata;
+    if (nsIp) {
+      queryDNS(DOMAIN_TO_RESOLVE, nsIp);
+    }
+  } else {
+    const answerRecor = answerRecords[0];
+    console.log(`Ip address found :${answerRecor?.rdata}`);
+  }
 }
 function isResponse(response: Buffer): boolean {
   const flags = response.readUInt16BE(2);
@@ -72,35 +91,45 @@ function parseSections(
 ): Array<DNSRecord> {
   let offset = startOffset;
   const records = [];
+ 
 
   for (let i = 0; i < count; i++) {
     const record = parseRecords(buffer, offset);
+    
     records.push(record);
+
     offset = record.newOffset;
   }
-
+  // console.log(count, JSON.stringify(records));
   return records;
 }
 
 function parseRecords(buffer: Buffer, offset: number): DNSRecord {
   const domainNameData = parseDomainName(buffer, offset);
   offset = domainNameData.newOffset;
-  // console.log(`Offset: ${offset}`);
+ 
   const type = buffer.readUInt16BE(offset);
-  // console.log(`Type: ${type}`);
+
   //  skipping the type bits
   offset += 2;
   const classValue = buffer.readUInt16BE(offset);
+
   //  skipping the class bits
   offset += 2;
+
   const ttl = buffer.readUInt32BE(offset);
+
   //skipping the ttl bits
   offset += 4;
+
   const dataLength = buffer.readUInt16BE(offset);
+
   //skipping the data length bits
+
   offset += 2;
   let rdata: string;
-  // console.log(domainNameData);
+
+  
   if (type === 2) {
     //work in progress
     //some understandings:
@@ -108,11 +137,16 @@ function parseRecords(buffer: Buffer, offset: number): DNSRecord {
     // redirects the query to the authoritative name server
     const { domainName, newOffset } = parseDomainName(buffer, offset);
     offset = newOffset;
+    //because in ns record the rdata is a domain name
     rdata = domainName;
   } else {
     const rdataBuffer = buffer.slice(offset, offset + dataLength);
-    const ipAddress = Array.from(rdataBuffer).join(".");
-    // console.log(ipAddress);
+    //increase the offset by the data length
+    offset += dataLength;
+    const ipAddress = interpretIp(rdataBuffer, type);
+    // console.log(`Ip address: ${ipAddress} type: ${type}`);
+    // const ipAddress = Array.from(rdataBuffer).join(".");
+    // console.log(Array.from(rdataBuffer));
     rdata = ipAddress;
   }
 
