@@ -6,7 +6,7 @@ import { parseDomainName } from "./parseDomainName";
 
 const ROOT_DNS_SERVER = "198.41.0.4";
 const PORT = 53;
-let DOMAIN_TO_RESOLVE = "devalan.tech";
+let DOMAIN_TO_RESOLVE = "bard.google.com";
 interface DNSRecord {
   domainName: string;
   newOffset: number;
@@ -30,7 +30,6 @@ function queryDNS(domain: string, server: string) {
   });
   client.on("message", (message) => {
     parseDNSResponse(message);
-    // console.log(`Received message: ${message}`);
   });
 }
 queryDNS(DOMAIN_TO_RESOLVE, ROOT_DNS_SERVER);
@@ -66,12 +65,9 @@ function parseDNSResponse(buffer: Buffer) {
 
   const additionalRecords = parseSections(buffer, additionalcount, offset);
   offset = updateOffset(additionalRecords, offset);
-  // console.log(`Question: ${JSON.stringify(authorityRecords)}`);
+  //  console.log(`answerRecords:${JSON.stringify(answerRecords)}`);
   //this means that the query is redirected to the name servers
-
   if (authorityRecords.length > 0 && answerRecords.length === 0) {
-    //one name server is enough to find the Ip address
-    // const nsRecord = authorityRecords[1];
     let nsRecord: DNSRecord | undefined;
 
     //ip address is present in the additional records
@@ -96,7 +92,11 @@ function parseDNSResponse(buffer: Buffer) {
     }
   } else {
     //if the answer is a cname record
-    if (answerRecords[0]?.type === 5) {
+    const typeARecord = answerRecords.find((record) => record.type === 1);
+    console.log(`typeARecord:${JSON.stringify(typeARecord)}`);
+    if (typeARecord) {
+      console.log(`Ip address found :${typeARecord?.rdata}`);
+    } else {
       const cnameRecord = answerRecords[0];
       console.log(`Cname found :${cnameRecord?.rdata}`);
 
@@ -106,13 +106,13 @@ function parseDNSResponse(buffer: Buffer) {
         0,
         cnameRecord.rdata.length - 1
       );
-        
+
       queryDNS(DOMAIN_TO_RESOLVE, ROOT_DNS_SERVER);
-    } else {
-      //for type A and AAAA records
-      const answerRecor = answerRecords[0];
-      console.log(`Ip address found :${answerRecor?.rdata}`);
     }
+    //for type A and AAAA records
+    // const answerRecor = answerRecords[0];
+    // console.log(`Ip address found :${answerRecor?.rdata}`);
+    // }
   }
 }
 function isResponse(response: Buffer): boolean {
@@ -179,7 +179,6 @@ function parseRecords(buffer: Buffer, offset: number): DNSRecord {
     const { domainName, newOffset } = parseDomainName(buffer, offset);
     offset = newOffset;
 
-    //because in ns record the rdata is a domain name
     rdata = domainName;
   } else {
     const rdataBuffer = buffer.slice(offset, offset + dataLength);
